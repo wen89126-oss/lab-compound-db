@@ -11,17 +11,7 @@ st.title("🧪 Chemical Storage Database")
 # -----------------------------
 # Init DB once (speed!)
 # -----------------------------
-@st.cache_resource
-def init_once():
-    init_db()
-    return True
-
-try:
-    init_once()
-except Exception as e:
-    st.error("❌ Database connection / init failed")
-    st.exception(e)
-    st.stop()
+st.caption("Database status: connected on demand")
 
 # -----------------------------
 # Options
