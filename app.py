@@ -16,7 +16,18 @@ st.caption("Database status: connected on demand")
 # -----------------------------
 # Options
 # -----------------------------
-LOCATIONS = ["Freezer A", "Freezer B", "Cabinet", "Desk", "Other"]
+LOCATIONS = [
+    "Normal",
+    "Solvent",
+    "Salt and acid",
+    "Dry box",
+    "Hood",
+    "4℃ fridge",
+    "-20℃ fridge",
+    "Glovebox",
+    "Outside",
+    "Other",
+]
 APPEARANCE = ["Solid", "Liquid", "Gas", "Other"]
 
 LID_COLOR_OPTIONS = {
