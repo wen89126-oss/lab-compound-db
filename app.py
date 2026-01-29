@@ -9,9 +9,18 @@ st.set_page_config(page_title="Chemical Storage Database", layout="wide")
 st.title("🧪 Chemical Storage Database")
 
 # -----------------------------
-# Init DB once (speed!)
+# Init DB once (safe)
 # -----------------------------
-st.caption("Database status: connected on demand")
+@st.cache_resource
+def _init_db_once():
+    init_db()
+    return True
+
+try:
+    _init_db_once()
+    st.caption("Database status: ready ✅")
+except Exception:
+    st.caption("Database status: connected on demand (init skipped)")
 
 # -----------------------------
 # Options
@@ -46,19 +55,16 @@ def label_to_key(mapping: dict, label: str) -> str:
     return "Other"
 
 # -----------------------------
-# Cached search (speed!)
+# NO cached search (fix PoolTimeout)
 # -----------------------------
-@st.cache_data(ttl=30)
-def cached_search(q: str, location: str, lid_color: str):
+def run_search(q: str, location: str, lid_color: str):
     return search_compounds(q=q, location=location, lid_color=lid_color)
 
 # Keep last search inputs
 if "last_search" not in st.session_state:
     st.session_state["last_search"] = {"q": "", "location": "All", "lid_color": "All", "ran": False}
 
-# -----------------------------
 # Tabs
-# -----------------------------
 tab_add, tab_search = st.tabs(["➕ 新增 (Add)", "🔎 查詢 (Search)"])
 
 # ======================================================
@@ -122,17 +128,25 @@ with tab_add:
                 appearance=appearance,
             )
 
-            # ✅ 新增後清快取，查詢立刻更新
-            st.cache_data.clear()
             st.success("✅ 已新增化學品 (Chemical added)")
+            st.info("到「查詢」頁面按 🔄 Refresh 或再按一次 🔎 Search 以更新結果。")
 
 # ======================================================
-# Search + Delete (button-triggered)
+# Search + Delete
 # ======================================================
 with tab_search:
     st.subheader("查詢化學品 (Search chemicals)")
 
-    # Search form: no DB call until you click Search
+    # Extra buttons
+    cbtn1, cbtn2 = st.columns([1, 5])
+    with cbtn1:
+        if st.button("🔄 Refresh", help="重新查詢（不使用 cache）"):
+            st.session_state["last_search"]["ran"] = True
+            st.rerun()
+    with cbtn2:
+        st.caption("提示：為了避免資料庫連線被塞爆（PoolTimeout），此版本不使用 cache。")
+
+    # Search form
     with st.form("search_form"):
         f1, f2, f3 = st.columns([2, 1, 1])
         with f1:
@@ -159,14 +173,14 @@ with tab_search:
 
         do_search = st.form_submit_button("🔎 Search")
 
-    # Run search only when button clicked, or show last results if already searched
     if do_search:
         st.session_state["last_search"] = {"q": q, "location": loc_filter, "lid_color": lid_filter, "ran": True}
 
     rows = []
     if st.session_state["last_search"]["ran"]:
         ls = st.session_state["last_search"]
-        rows = cached_search(ls["q"], ls["location"], ls["lid_color"])
+        with st.spinner("Searching database..."):
+            rows = run_search(ls["q"], ls["location"], ls["lid_color"])
     else:
         st.info("請先按 🔎 Search (Click Search to query)")
 
@@ -254,8 +268,6 @@ with tab_search:
                     with c2:
                         if st.button("✅ Yes, delete", key=f"confirm_{row['id']}"):
                             delete_compound(int(row["id"]))
-                            # ✅ 刪除後清快取，查詢立刻更新
-                            st.cache_data.clear()
                             st.success("Deleted")
                             st.session_state["delete_id"] = None
                             st.session_state["delete_name"] = None
