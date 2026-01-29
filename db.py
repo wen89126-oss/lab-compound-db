@@ -6,11 +6,13 @@ import psycopg
 from psycopg.rows import tuple_row
 from psycopg_pool import ConnectionPool
 
-# -----------------------------
-# Read DATABASE_URL
-# -----------------------------
+# =====================================================
+# DB URL
+# =====================================================
 def _get_db_url() -> str:
-    # 先讀 Streamlit secrets，再讀環境變數
+    """
+    Read DATABASE_URL from Streamlit secrets first, then environment variable.
+    """
     db_url = None
     try:
         db_url = st.secrets.get("DATABASE_URL", None)
@@ -30,20 +32,19 @@ def _get_db_url() -> str:
     return str(db_url).strip()
 
 
-# -----------------------------
-# Connection pool (create once)
-# -----------------------------
+# =====================================================
+# Connection Pool (create once per app lifecycle)
+# =====================================================
 @st.cache_resource
 def get_pool() -> ConnectionPool:
     db_url = _get_db_url()
 
-    # ✅ 小型 app 建議 max_size 1~3，避免 Streamlit rerun 造成連線爆掉
-    # ✅ timeout 控制拿連線的等待時間
+    # Streamlit reruns a lot -> keep the pool small to avoid exhausting connections
     pool = ConnectionPool(
         conninfo=db_url,
         min_size=1,
         max_size=2,
-        timeout=10,
+        timeout=10,  # seconds to wait for a free connection
         kwargs={
             "sslmode": "require",
             "connect_timeout": 10,
@@ -55,15 +56,15 @@ def get_pool() -> ConnectionPool:
 
 
 def get_conn():
-    # psycopg_pool 的 connection() 是 context manager
+    # psycopg_pool's connection() is a context manager
     return get_pool().connection()
 
 
-# -----------------------------
+# =====================================================
 # Init DB
-# -----------------------------
+# =====================================================
 def init_db():
-    """建立資料表與索引（若不存在）"""
+    """Create table and indexes if not exists."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -84,7 +85,6 @@ def init_db():
                 """
             )
 
-            # 索引：查詢會快很多
             cur.execute("CREATE INDEX IF NOT EXISTS idx_compounds_english_name ON compounds (english_name)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_compounds_cas ON compounds (cas)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_compounds_location ON compounds (location)")
@@ -93,9 +93,9 @@ def init_db():
         conn.commit()
 
 
-# -----------------------------
+# =====================================================
 # Insert / Delete
-# -----------------------------
+# =====================================================
 def insert_compound(
     english_name: str,
     formula: str,
@@ -107,7 +107,7 @@ def insert_compound(
     lid_color: str,
     appearance: str,
 ):
-    """新增一筆化學品資料（mw 可為 None）"""
+    """Insert a compound row (mw can be None)."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -134,24 +134,26 @@ def insert_compound(
 
 
 def delete_compound(compound_id: int):
-    """用 id 刪除一筆資料（最安全）"""
+    """Delete by id (safest)."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM compounds WHERE id = %s", (compound_id,))
         conn.commit()
 
 
-# -----------------------------
+# =====================================================
 # Search
-# -----------------------------
-_CAS_LIKE_RE = re.compile(r"^[0-9\-]+$")
+# =====================================================
+_CAS_QUERY_RE = re.compile(r"^[0-9\-]+$")
 
 def search_compounds(q: str = "", location: str = "All", lid_color: str = "All"):
     """
-    查詢資料：
-    - english_name / formula：模糊搜尋（contains）
-    - cas：如果輸入看起來像 CAS（只含數字與 -），則改用「開頭匹配」(prefix)
-      例：輸入 75 -> 只回傳 75-xx-x，不會回傳 2675-xx-x
+    Search logic:
+    - If q looks like a CAS query (only digits and '-'), then:
+        cas must START WITH q  (prefix match)
+        e.g. q="75" -> matches "75-59-2" and "7598-35-8"
+                    -> NOT match "7789-75-5"
+    - Otherwise, do contains search across english_name/formula/cas.
     """
     sql = """
     SELECT id, english_name, formula, mw, cas,
@@ -164,17 +166,14 @@ def search_compounds(q: str = "", location: str = "All", lid_color: str = "All")
 
     if q and q.strip():
         q = q.strip()
-
-        # 判斷是不是 CAS 查詢（只由數字與 - 組成）
-        is_cas_query = bool(_CAS_LIKE_RE.match(q))
+        is_cas_query = bool(_CAS_QUERY_RE.match(q))
 
         if is_cas_query:
-            # ✅ CAS：只做 prefix match（開頭比對）
-            # ILIKE 讓大小寫不敏感（雖然 CAS 理論上只會是數字和 -）
+            # ✅ CAS prefix match ONLY
             sql += " AND cas ILIKE %s"
             params.append(f"{q}%")
         else:
-            # ✅ 一般查詢：english_name / formula / cas 模糊搜尋
+            # ✅ General contains match
             like = f"%{q}%"
             sql += " AND (english_name ILIKE %s OR formula ILIKE %s OR cas ILIKE %s)"
             params += [like, like, like]
