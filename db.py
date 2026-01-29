@@ -1,98 +1,67 @@
+# db.py
 import os
+import re
+import streamlit as st
 import psycopg
+from psycopg.rows import tuple_row
 from psycopg_pool import ConnectionPool
 
-# 先讀 Streamlit secrets（本機 .streamlit/secrets.toml）
-try:
-    import streamlit as st
-    DATABASE_URL = st.secrets.get("DATABASE_URL", None)
-except Exception:
-    st = None
-    DATABASE_URL = None
+# -----------------------------
+# Read DATABASE_URL
+# -----------------------------
+def _get_db_url() -> str:
+    # 先讀 Streamlit secrets，再讀環境變數
+    db_url = None
+    try:
+        db_url = st.secrets.get("DATABASE_URL", None)
+    except Exception:
+        db_url = None
 
-# 沒有 secrets 就讀環境變數（部署用）
-if not DATABASE_URL:
-    DATABASE_URL = os.environ.get("DATABASE_URL")
+    if not db_url:
+        db_url = os.environ.get("DATABASE_URL")
 
-
-def _require_db_url() -> str:
-    if not DATABASE_URL:
+    if not db_url:
         raise RuntimeError(
             "DATABASE_URL not set. "
             "Local: put it in .streamlit/secrets.toml. "
-            "Cloud: set it as a Secret named DATABASE_URL."
-        )
-    return DATABASE_URL
-
-
-def test_db_connection():
-    """
-    直接用 psycopg.connect 測一次，目的就是把「真正錯誤」抓出來，
-    不要被 pool 的 PoolTimeout 蓋住。
-    """
-    db_url = _require_db_url()
-    try:
-        with psycopg.connect(db_url, sslmode="require", connect_timeout=5) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1;")
-                cur.fetchone()
-        return True
-    except Exception as e:
-        # 這邊會在 Logs 顯示真正原因（例如 password failed / timeout / host 解析不到）
-        raise RuntimeError(f"Direct DB connect test failed: {type(e).__name__}: {e}") from e
-
-
-# ✅ 用 cache_resource：整個 app lifecycle 只建立一次 pool
-if st is not None:
-    @st.cache_resource
-    def get_pool() -> ConnectionPool:
-        # 先測一次真連線（抓真錯）
-        test_db_connection()
-
-        db_url = _require_db_url()
-        pool = ConnectionPool(
-            conninfo=db_url,
-            kwargs={"sslmode": "require", "connect_timeout": 5},
-            min_size=1,
-            max_size=3,     # 先小一點，避免 free tier DB 連線數爆掉
-            timeout=10,
-            max_waiting=10,
+            "Cloud: set it as a secret named DATABASE_URL."
         )
 
-        # 等待 pool 真的建立出至少 min_size 的連線
-        try:
-            pool.wait(timeout=10)
-        except Exception:
-            # 再測一次 direct connect 把真錯抓出來
-            test_db_connection()
-            # 如果 direct connect OK，但 pool still fail，才丟 pool 的錯
-            raise
+    return str(db_url).strip()
 
-        return pool
-else:
-    _GLOBAL_POOL = None
 
-    def get_pool() -> ConnectionPool:
-        global _GLOBAL_POOL
-        if _GLOBAL_POOL is None:
-            test_db_connection()
-            db_url = _require_db_url()
-            _GLOBAL_POOL = ConnectionPool(
-                conninfo=db_url,
-                kwargs={"sslmode": "require", "connect_timeout": 5},
-                min_size=1,
-                max_size=3,
-                timeout=10,
-                max_waiting=10,
-            )
-            _GLOBAL_POOL.wait(timeout=10)
-        return _GLOBAL_POOL
+# -----------------------------
+# Connection pool (create once)
+# -----------------------------
+@st.cache_resource
+def get_pool() -> ConnectionPool:
+    db_url = _get_db_url()
+
+    # ✅ 小型 app 建議 max_size 1~3，避免 Streamlit rerun 造成連線爆掉
+    # ✅ timeout 控制拿連線的等待時間
+    pool = ConnectionPool(
+        conninfo=db_url,
+        min_size=1,
+        max_size=2,
+        timeout=10,
+        kwargs={
+            "sslmode": "require",
+            "connect_timeout": 10,
+            "autocommit": False,
+            "row_factory": tuple_row,
+        },
+    )
+    return pool
 
 
 def get_conn():
+    # psycopg_pool 的 connection() 是 context manager
     return get_pool().connection()
 
 
+# -----------------------------
+# Init DB
+# -----------------------------
 def init_db():
     """建立資料表與索引（若不存在）"""
     with get_conn() as conn:
@@ -115,6 +84,7 @@ def init_db():
                 """
             )
 
+            # 索引：查詢會快很多
             cur.execute("CREATE INDEX IF NOT EXISTS idx_compounds_english_name ON compounds (english_name)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_compounds_cas ON compounds (cas)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_compounds_location ON compounds (location)")
@@ -123,6 +93,9 @@ def init_db():
         conn.commit()
 
 
+# -----------------------------
+# Insert / Delete
+# -----------------------------
 def insert_compound(
     english_name: str,
     formula: str,
@@ -168,8 +141,18 @@ def delete_compound(compound_id: int):
         conn.commit()
 
 
+# -----------------------------
+# Search
+# -----------------------------
+_CAS_LIKE_RE = re.compile(r"^[0-9\-]+$")
+
 def search_compounds(q: str = "", location: str = "All", lid_color: str = "All"):
-    """查詢資料（不分大小寫）"""
+    """
+    查詢資料：
+    - english_name / formula：模糊搜尋（contains）
+    - cas：如果輸入看起來像 CAS（只含數字與 -），則改用「開頭匹配」(prefix)
+      例：輸入 75 -> 只回傳 75-xx-x，不會回傳 2675-xx-x
+    """
     sql = """
     SELECT id, english_name, formula, mw, cas,
            package_size, location, location_detail,
@@ -179,10 +162,22 @@ def search_compounds(q: str = "", location: str = "All", lid_color: str = "All")
     """
     params = []
 
-    if q.strip():
-        like = f"%{q.strip()}%"
-        sql += " AND (english_name ILIKE %s OR formula ILIKE %s OR cas ILIKE %s)"
-        params += [like, like, like]
+    if q and q.strip():
+        q = q.strip()
+
+        # 判斷是不是 CAS 查詢（只由數字與 - 組成）
+        is_cas_query = bool(_CAS_LIKE_RE.match(q))
+
+        if is_cas_query:
+            # ✅ CAS：只做 prefix match（開頭比對）
+            # ILIKE 讓大小寫不敏感（雖然 CAS 理論上只會是數字和 -）
+            sql += " AND cas ILIKE %s"
+            params.append(f"{q}%")
+        else:
+            # ✅ 一般查詢：english_name / formula / cas 模糊搜尋
+            like = f"%{q}%"
+            sql += " AND (english_name ILIKE %s OR formula ILIKE %s OR cas ILIKE %s)"
+            params += [like, like, like]
 
     if location != "All":
         sql += " AND location = %s"
