@@ -10,9 +10,7 @@ from psycopg_pool import ConnectionPool
 # DB URL
 # =====================================================
 def _get_db_url() -> str:
-    """
-    Read DATABASE_URL from Streamlit secrets first, then environment variable.
-    """
+    """Read DATABASE_URL from Streamlit secrets first, then environment variable."""
     db_url = None
     try:
         db_url = st.secrets.get("DATABASE_URL", None)
@@ -28,7 +26,6 @@ def _get_db_url() -> str:
             "Local: put it in .streamlit/secrets.toml. "
             "Cloud: set it as a secret named DATABASE_URL."
         )
-
     return str(db_url).strip()
 
 
@@ -39,7 +36,7 @@ def _get_db_url() -> str:
 def get_pool() -> ConnectionPool:
     db_url = _get_db_url()
 
-    # Streamlit reruns a lot -> keep the pool small to avoid exhausting connections
+    # Keep pool small to avoid exhausting Supabase connections on Streamlit reruns
     pool = ConnectionPool(
         conninfo=db_url,
         min_size=1,
@@ -56,7 +53,7 @@ def get_pool() -> ConnectionPool:
 
 
 def get_conn():
-    # psycopg_pool's connection() is a context manager
+    """Return a pooled connection context manager."""
     return get_pool().connection()
 
 
@@ -85,6 +82,7 @@ def init_db():
                 """
             )
 
+            # Indexes
             cur.execute("CREATE INDEX IF NOT EXISTS idx_compounds_english_name ON compounds (english_name)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_compounds_cas ON compounds (cas)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_compounds_location ON compounds (location)")
@@ -144,16 +142,19 @@ def delete_compound(compound_id: int):
 # =====================================================
 # Search
 # =====================================================
+# Treat query as CAS-like only if it's digits and hyphens (e.g. "75", "75-", "75-07", "75-07-0")
 _CAS_QUERY_RE = re.compile(r"^[0-9\-]+$")
+
 
 def search_compounds(q: str = "", location: str = "All", lid_color: str = "All"):
     """
     Search logic:
-    - If q looks like a CAS query (only digits and '-'), then:
-        cas must START WITH q  (prefix match)
+    - If q looks like a CAS query (only digits and '-'):
+        cas must START WITH q (prefix match)
         e.g. q="75" -> matches "75-59-2" and "7598-35-8"
                     -> NOT match "7789-75-5"
-    - Otherwise, do contains search across english_name/formula/cas.
+    - Otherwise: contains search across english_name/formula/cas.
+    - Result ordering: sort by CAS numerically (NULL/empty CAS goes last).
     """
     sql = """
     SELECT id, english_name, formula, mw, cas,
@@ -169,7 +170,7 @@ def search_compounds(q: str = "", location: str = "All", lid_color: str = "All")
         is_cas_query = bool(_CAS_QUERY_RE.match(q))
 
         if is_cas_query:
-            # ✅ CAS prefix match ONLY
+            # ✅ CAS prefix match ONLY (no contains)
             sql += " AND cas ILIKE %s"
             params.append(f"{q}%")
         else:
@@ -186,7 +187,14 @@ def search_compounds(q: str = "", location: str = "All", lid_color: str = "All")
         sql += " AND lid_color = %s"
         params.append(lid_color)
 
-    sql += " ORDER BY created_at DESC"
+    # ✅ Sort by CAS numerically; put NULL/empty CAS last
+    sql += """
+    ORDER BY
+      CASE WHEN cas IS NULL OR cas = '' THEN 1 ELSE 0 END,
+      split_part(cas, '-', 1)::int,
+      split_part(cas, '-', 2)::int,
+      split_part(cas, '-', 3)::int
+    """
 
     with get_conn() as conn:
         with conn.cursor() as cur:
