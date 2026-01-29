@@ -1,8 +1,5 @@
-# db.py
 import os
 import psycopg
-
-# 連線池（psycopg3 官方 pool 套件）
 from psycopg_pool import ConnectionPool
 
 # 先讀 Streamlit secrets（本機 .streamlit/secrets.toml）
@@ -28,44 +25,71 @@ def _require_db_url() -> str:
     return DATABASE_URL
 
 
-# ✅ 用 cache_resource：整個 app lifecycle 只建立一次 pool（超關鍵）
-#    - Streamlit rerun 不會一直開新連線
-#    - 大幅降低 OperationalError / too many connections / 偶發 timeout
+def test_db_connection():
+    """
+    直接用 psycopg.connect 測一次，目的就是把「真正錯誤」抓出來，
+    不要被 pool 的 PoolTimeout 蓋住。
+    """
+    db_url = _require_db_url()
+    try:
+        with psycopg.connect(db_url, sslmode="require", connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1;")
+                cur.fetchone()
+        return True
+    except Exception as e:
+        # 這邊會在 Logs 顯示真正原因（例如 password failed / timeout / host 解析不到）
+        raise RuntimeError(f"Direct DB connect test failed: {type(e).__name__}: {e}") from e
+
+
+# ✅ 用 cache_resource：整個 app lifecycle 只建立一次 pool
 if st is not None:
     @st.cache_resource
     def get_pool() -> ConnectionPool:
+        # 先測一次真連線（抓真錯）
+        test_db_connection()
+
         db_url = _require_db_url()
-        return ConnectionPool(
+        pool = ConnectionPool(
             conninfo=db_url,
-            # 把 ssl / timeout 集中放這裡，避免跟 URL query 參數衝突
             kwargs={"sslmode": "require", "connect_timeout": 5},
             min_size=1,
-            max_size=5,   # free tier DB 通常連線數很小，別設太大
-            timeout=10,   # 借不到連線最多等 10 秒
+            max_size=3,     # 先小一點，避免 free tier DB 連線數爆掉
+            timeout=10,
+            max_waiting=10,
         )
+
+        # 等待 pool 真的建立出至少 min_size 的連線
+        try:
+            pool.wait(timeout=10)
+        except Exception:
+            # 再測一次 direct connect 把真錯抓出來
+            test_db_connection()
+            # 如果 direct connect OK，但 pool still fail，才丟 pool 的錯
+            raise
+
+        return pool
 else:
-    # 沒有 streamlit（例如純 python script 跑 init）就用全域 pool
     _GLOBAL_POOL = None
 
     def get_pool() -> ConnectionPool:
         global _GLOBAL_POOL
         if _GLOBAL_POOL is None:
+            test_db_connection()
             db_url = _require_db_url()
             _GLOBAL_POOL = ConnectionPool(
                 conninfo=db_url,
                 kwargs={"sslmode": "require", "connect_timeout": 5},
                 min_size=1,
-                max_size=5,
+                max_size=3,
                 timeout=10,
+                max_waiting=10,
             )
+            _GLOBAL_POOL.wait(timeout=10)
         return _GLOBAL_POOL
 
 
 def get_conn():
-    """
-    回傳一個可用在 `with get_conn() as conn:` 的連線 context manager
-    會自動從 pool 借連線，用完歸還。
-    """
     return get_pool().connection()
 
 
@@ -91,7 +115,6 @@ def init_db():
                 """
             )
 
-            # ✅ Index：資料變多後查詢差超多
             cur.execute("CREATE INDEX IF NOT EXISTS idx_compounds_english_name ON compounds (english_name)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_compounds_cas ON compounds (cas)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_compounds_location ON compounds (location)")
