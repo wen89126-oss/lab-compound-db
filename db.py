@@ -1,11 +1,16 @@
+# db.py
 import os
 import psycopg
+
+# 連線池（psycopg3 官方 pool 套件）
+from psycopg_pool import ConnectionPool
 
 # 先讀 Streamlit secrets（本機 .streamlit/secrets.toml）
 try:
     import streamlit as st
     DATABASE_URL = st.secrets.get("DATABASE_URL", None)
 except Exception:
+    st = None
     DATABASE_URL = None
 
 # 沒有 secrets 就讀環境變數（部署用）
@@ -13,19 +18,55 @@ if not DATABASE_URL:
     DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
-def get_conn():
+def _require_db_url() -> str:
     if not DATABASE_URL:
         raise RuntimeError(
             "DATABASE_URL not set. "
             "Local: put it in .streamlit/secrets.toml. "
-            "Cloud: set it as an environment variable/secret named DATABASE_URL."
+            "Cloud: set it as a Secret named DATABASE_URL."
         )
-    # ✅ 防止卡住：5 秒內連不上就報錯
-    return psycopg.connect(
-        DATABASE_URL,
-        sslmode="require",
-        connect_timeout=5,
-    )
+    return DATABASE_URL
+
+
+# ✅ 用 cache_resource：整個 app lifecycle 只建立一次 pool（超關鍵）
+#    - Streamlit rerun 不會一直開新連線
+#    - 大幅降低 OperationalError / too many connections / 偶發 timeout
+if st is not None:
+    @st.cache_resource
+    def get_pool() -> ConnectionPool:
+        db_url = _require_db_url()
+        return ConnectionPool(
+            conninfo=db_url,
+            # 把 ssl / timeout 集中放這裡，避免跟 URL query 參數衝突
+            kwargs={"sslmode": "require", "connect_timeout": 5},
+            min_size=1,
+            max_size=5,   # free tier DB 通常連線數很小，別設太大
+            timeout=10,   # 借不到連線最多等 10 秒
+        )
+else:
+    # 沒有 streamlit（例如純 python script 跑 init）就用全域 pool
+    _GLOBAL_POOL = None
+
+    def get_pool() -> ConnectionPool:
+        global _GLOBAL_POOL
+        if _GLOBAL_POOL is None:
+            db_url = _require_db_url()
+            _GLOBAL_POOL = ConnectionPool(
+                conninfo=db_url,
+                kwargs={"sslmode": "require", "connect_timeout": 5},
+                min_size=1,
+                max_size=5,
+                timeout=10,
+            )
+        return _GLOBAL_POOL
+
+
+def get_conn():
+    """
+    回傳一個可用在 `with get_conn() as conn:` 的連線 context manager
+    會自動從 pool 借連線，用完歸還。
+    """
+    return get_pool().connection()
 
 
 def init_db():
