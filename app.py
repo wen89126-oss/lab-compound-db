@@ -3,37 +3,15 @@ import pandas as pd
 from db import init_db, insert_compound, search_compounds, delete_compound
 
 # ======================================================
-# Page config
+# Page
 # ======================================================
 st.set_page_config(page_title="Chemical Storage Database", layout="wide")
 st.title("🧪 Chemical Storage Database")
-
-# ======================================================
-# ✅ Center dataframe text (header + cells)
-# ======================================================
-st.markdown(
-    """
-    <style>
-    [data-testid="stDataFrame"] thead th {
-        text-align: center !important;
-    }
-
-    [data-testid="stDataFrame"] tbody td {
-        text-align: center !important;
-    }
-
-    [data-testid="stDataFrame"] div[role="gridcell"] {
-        justify-content: center !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.caption("Database status: connected on demand")
 
 # ======================================================
 # Init DB
 # ======================================================
-st.caption("Database status: connected on demand")
 init_db()
 
 # ======================================================
@@ -51,7 +29,6 @@ LOCATIONS = [
     "Outside",
     "Other",
 ]
-
 APPEARANCE = ["Solid", "Liquid", "Gas", "Other"]
 
 LID_COLOR_OPTIONS = {
@@ -63,24 +40,69 @@ LID_COLOR_OPTIONS = {
     "Other": "❓ Other",
 }
 
-
 def label_to_key(mapping: dict, label: str) -> str:
     for k, v in mapping.items():
         if v == label:
             return k
     return "Other"
 
-
 # ======================================================
 # Session state
 # ======================================================
 if "last_search" not in st.session_state:
-    st.session_state["last_search"] = {
-        "q": "",
-        "location": "All",
-        "lid_color": "All",
-        "ran": False,
+    st.session_state["last_search"] = {"q": "", "location": "All", "lid_color": "All", "ran": False}
+
+# ======================================================
+# ✅ Centered HTML table styles (scrollable)
+# ======================================================
+st.markdown(
+    """
+    <style>
+    .table-wrap {
+        max-height: 560px;
+        overflow: auto;
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 10px;
     }
+    .table-wrap table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+    }
+    .table-wrap thead th {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        background: rgba(20, 20, 20, 0.98);
+        border-bottom: 1px solid rgba(255,255,255,0.12);
+        padding: 10px 8px;
+        text-align: center !important;
+        white-space: nowrap;
+    }
+    .table-wrap td {
+        border-bottom: 1px solid rgba(255,255,255,0.08);
+        padding: 8px 8px;
+        text-align: center !important;
+        vertical-align: middle;
+        white-space: nowrap;
+    }
+    .table-wrap tr:hover td {
+        background: rgba(255,255,255,0.04);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+def render_centered_table(df: pd.DataFrame):
+    """Render a centered, scrollable HTML table."""
+    if df.empty:
+        st.info("No records.")
+        return
+
+    # escape=False 讓 emoji 可以正常顯示
+    html = df.to_html(index=False, escape=False)
+    st.markdown(f"<div class='table-wrap'>{html}</div>", unsafe_allow_html=True)
 
 # ======================================================
 # Tabs
@@ -88,7 +110,7 @@ if "last_search" not in st.session_state:
 tab_add, tab_search = st.tabs(["➕ 新增 (Add)", "🔎 查詢 (Search)"])
 
 # ======================================================
-# ➕ Add
+# Add
 # ======================================================
 with tab_add:
     st.subheader("新增化學品 (Add chemical)")
@@ -99,42 +121,39 @@ with tab_add:
 
         col1, col2 = st.columns(2)
         with col1:
-            formula = st.text_input("分子式 (Formula)")
+            formula = st.text_input("分子式 (Formula)", placeholder="e.g., C8H10N4O2")
         with col2:
-            mw_text = st.text_input("分子量 (MW)")
+            mw_text = st.text_input("分子量 (MW)", placeholder="e.g., 312.45")
 
-        package_size = st.text_input("包裝大小 (Package size)")
+        package_size = st.text_input("包裝大小 (Package size)", placeholder="e.g., 25 g / 100 mL")
 
         st.markdown("### 位置 (Location)")
         c1, c2 = st.columns([1, 2])
         with c1:
-            location = st.selectbox("位置", LOCATIONS)
+            location = st.selectbox("位置 (Location)", LOCATIONS)
         with c2:
-            location_detail = st.text_input("詳細位置")
+            location_detail = st.text_input("詳細位置 (Location detail)", placeholder="e.g., Box 3 / Shelf 2 / Vial 12")
 
         colA, colB = st.columns(2)
         with colA:
-            lid_color_label = st.selectbox(
-                "蓋子顏色", list(LID_COLOR_OPTIONS.values())
-            )
+            lid_color_label = st.selectbox("蓋子顏色 (Lid color)", list(LID_COLOR_OPTIONS.values()))
             lid_color = label_to_key(LID_COLOR_OPTIONS, lid_color_label)
-
         with colB:
-            appearance = st.selectbox("性狀", APPEARANCE)
+            appearance = st.selectbox("性狀 (Appearance)", APPEARANCE)
 
-        submitted = st.form_submit_button("💾 儲存")
+        submitted = st.form_submit_button("💾 儲存 (Save)")
 
     if submitted:
         if not english_name.strip():
-            st.error("請輸入英文名")
+            st.error("請輸入英文名 (Please enter English name)")
             st.stop()
 
         mw_value = None
         if mw_text.strip():
             try:
-                mw_value = float(mw_text)
+                mw_value = float(mw_text.strip())
             except ValueError:
-                st.error("MW 必須是數字")
+                st.error("MW 請輸入數字 (Please enter a number)")
                 st.stop()
 
         insert_compound(
@@ -148,71 +167,50 @@ with tab_add:
             lid_color=lid_color,
             appearance=appearance,
         )
-
-        st.success("✅ 已新增")
+        st.success("✅ 已新增化學品 (Chemical added)")
 
 # ======================================================
-# 🔎 Search
+# Search + Delete
 # ======================================================
 with tab_search:
     st.subheader("查詢化學品 (Search chemicals)")
 
     with st.form("search_form"):
         f1, f2, f3 = st.columns([2, 1, 1])
-
         with f1:
             q = st.text_input(
-                "Keyword (Name / Formula / CAS)",
+                "關鍵字 (Keyword: English / Formula / CAS)",
                 value=st.session_state["last_search"]["q"],
             )
-
         with f2:
             loc_filter = st.selectbox(
-                "Location",
+                "位置 (Location)",
                 ["All"] + LOCATIONS,
-                index=(["All"] + LOCATIONS).index(
-                    st.session_state["last_search"]["location"]
-                ),
+                index=(["All"] + LOCATIONS).index(st.session_state["last_search"]["location"]),
             )
-
         with f3:
-            lid_labels = ["All"] + list(LID_COLOR_OPTIONS.values())
-            last = st.session_state["last_search"]["lid_color"]
-            last_label = (
-                "All" if last == "All" else LID_COLOR_OPTIONS.get(last, "❓ Other")
-            )
-
+            lid_all_labels = ["All"] + list(LID_COLOR_OPTIONS.values())
+            last_lid = st.session_state["last_search"]["lid_color"]
+            last_lid_label = "All" if last_lid == "All" else LID_COLOR_OPTIONS.get(last_lid, "❓ Other")
             lid_filter_label = st.selectbox(
-                "Lid color",
-                lid_labels,
-                index=lid_labels.index(last_label),
+                "蓋子顏色 (Lid color)",
+                lid_all_labels,
+                index=lid_all_labels.index(last_lid_label),
             )
-
-            lid_filter = (
-                "All"
-                if lid_filter_label == "All"
-                else label_to_key(LID_COLOR_OPTIONS, lid_filter_label)
-            )
+            lid_filter = "All" if lid_filter_label == "All" else label_to_key(LID_COLOR_OPTIONS, lid_filter_label)
 
         do_search = st.form_submit_button("🔎 Search")
 
     if do_search:
-        st.session_state["last_search"] = {
-            "q": q,
-            "location": loc_filter,
-            "lid_color": lid_filter,
-            "ran": True,
-        }
+        st.session_state["last_search"] = {"q": q, "location": loc_filter, "lid_color": lid_filter, "ran": True}
 
     rows = []
     if st.session_state["last_search"]["ran"]:
         ls = st.session_state["last_search"]
         with st.spinner("Searching database..."):
-            rows = search_compounds(
-                q=ls["q"], location=ls["location"], lid_color=ls["lid_color"]
-            )
+            rows = search_compounds(q=ls["q"], location=ls["location"], lid_color=ls["lid_color"])
     else:
-        st.info("請先按 Search")
+        st.info("請先按 🔎 Search (Click Search to query)")
 
     df = pd.DataFrame(
         rows,
@@ -231,81 +229,74 @@ with tab_search:
         ],
     )
 
-    if not df.empty:
-        df_display = df.copy()
-        df_display["lid_color"] = df_display["lid_color"].apply(
-            lambda x: LID_COLOR_OPTIONS.get(x, "❓ Other")
-        )
-    else:
-        df_display = df
+    # 顯示時把 lid_color 轉成 emoji label
+    df_display = df.copy()
+    if not df_display.empty:
+        df_display["lid_color"] = df_display["lid_color"].apply(lambda x: LID_COLOR_OPTIONS.get(x, "❓ Other"))
 
-    st.write(f"找到 {len(df_display)} 筆")
-    st.data_editor(
-    df_display,
-    width="stretch",
-    disabled=True,
-    hide_index=True,
-)
+    st.write(f"找到 {len(df_display)} 筆 (Found {len(df_display)} records)")
 
+    # ✅ Centered table render
+    render_centered_table(df_display)
 
     st.download_button(
-        "⬇️ Download CSV",
+        "⬇️ 下載 CSV (Download CSV)",
         data=df_display.to_csv(index=False).encode("utf-8-sig"),
         file_name="chemicals.csv",
         mime="text/csv",
         disabled=df_display.empty,
     )
 
-    # ==================================================
-    # Delete
-    # ==================================================
+    # -----------------------------
+    # Delete section (safe confirm)
+    # -----------------------------
     if not df.empty:
         st.markdown("---")
-        st.subheader("🗑 刪除資料")
+        st.subheader("🗑 刪除資料 (Delete records)")
 
         if "delete_id" not in st.session_state:
             st.session_state["delete_id"] = None
             st.session_state["delete_name"] = None
 
         for _, row in df.iterrows():
-            header = f"#{row['id']} | {row['english_name']} | {row['cas'] or ''}"
+            header = f"#{row['id']} | {row['english_name']} | {row['formula'] or ''} | {row['cas'] or ''}"
 
             with st.expander(header):
                 st.write(
                     f"""
-                    **Name:** {row['english_name']}  
+                    **English name:** {row['english_name']}  
                     **Formula:** {row['formula']}  
                     **MW:** {row['mw']}  
                     **CAS:** {row['cas']}  
-                    **Package:** {row['package_size']}  
+                    **Package size:** {row['package_size']}  
                     **Location:** {row['location']}  
-                    **Detail:** {row['location_detail']}  
-                    **Lid:** {LID_COLOR_OPTIONS.get(row['lid_color'], '❓ Other')}  
+                    **Location detail:** {row['location_detail']}  
+                    **Lid color:** {LID_COLOR_OPTIONS.get(row['lid_color'], '❓ Other')}  
                     **Appearance:** {row['appearance']}  
+                    **Created at:** {row['created_at']}
                     """
                 )
 
-                col1, col2 = st.columns(2)
-
+                col1, col2 = st.columns([1, 3])
                 with col1:
-                    if st.button("🗑 Delete", key=f"d_{row['id']}"):
-                        st.session_state["delete_id"] = row["id"]
+                    if st.button("🗑 Delete", key=f"del_{row['id']}"):
+                        st.session_state["delete_id"] = int(row["id"])
                         st.session_state["delete_name"] = row["english_name"]
 
-                if st.session_state["delete_id"] == row["id"]:
+                if st.session_state["delete_id"] == int(row["id"]):
                     st.warning(
-                        f"確定刪除 **{st.session_state['delete_name']}** ?"
+                        f"Are you sure you want to delete **{st.session_state['delete_name']}** (id={st.session_state['delete_id']}) ?"
                     )
-
                     c1, c2 = st.columns(2)
                     with c1:
-                        if st.button("Cancel", key=f"c_{row['id']}"):
+                        if st.button("❌ Cancel", key=f"cancel_{row['id']}"):
                             st.session_state["delete_id"] = None
+                            st.session_state["delete_name"] = None
                             st.rerun()
-
                     with c2:
-                        if st.button("Yes, delete", key=f"y_{row['id']}"):
-                            delete_compound(row["id"])
+                        if st.button("✅ Yes, delete", key=f"confirm_{row['id']}"):
+                            delete_compound(int(row["id"]))
                             st.success("Deleted")
                             st.session_state["delete_id"] = None
+                            st.session_state["delete_name"] = None
                             st.rerun()
