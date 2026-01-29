@@ -240,7 +240,13 @@ with tab_search:
         df_display = df
 
     st.write(f"找到 {len(df_display)} 筆")
-    st.dataframe(df_display, width="stretch")
+    st.data_editor(
+    df_display,
+    width="stretch",
+    disabled=True,
+    hide_index=True,
+)
+
 
     st.download_button(
         "⬇️ Download CSV",
